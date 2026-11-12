@@ -119,34 +119,87 @@ def check_totals(inv: Invoice, check_line_item_arithmetic: bool = False) -> list
     return [] if abs(computed - Decimal(str(inv.total))) <= tolerance else ["totals_mismatch"]
 
 
-def check_duplicate(conn: sqlite3.Connection, ref: ReferenceData, inv: Invoice) -> list[str]:
-    if inv.document_type != "invoice" or not inv.invoice_date or not inv.invoice_number:
+def find_duplicate_records(
+    conn: sqlite3.Connection,
+    ref: ReferenceData,
+    *,
+    document_type: str,
+    supplier_gstin: str | None,
+    supplier_name: str | None,
+    currency: str,
+    invoice_number: str | None,
+    invoice_date: date | str | None,
+    exclude_invoice_id: int | None = None,
+) -> list[dict]:
+    if document_type != "invoice" or not invoice_date or not invoice_number:
         return []
-    supplier_key = _supplier_key(inv.supplier_gstin, inv.supplier_name, inv.currency)
+    supplier_key = _supplier_key(supplier_gstin, supplier_name, currency)
     if not supplier_key[1]:
         return []
-    normalized_number = normalize_invoice_number(inv.invoice_number)
-    fiscal_year = _fiscal_year(inv.invoice_date)
+    normalized_number = normalize_invoice_number(invoice_number)
+    date_value = invoice_date.isoformat() if isinstance(invoice_date, date) else invoice_date
+    fiscal_year = _date_fiscal_year(date_value)
+    if fiscal_year is None:
+        return []
+    matches = []
     for paid in ref.paid_invoices:
-        paid_key = _supplier_key(paid.get("supplier_gstin"), paid.get("supplier_name"), inv.currency)
+        paid_key = _supplier_key(paid.get("supplier_gstin"), paid.get("supplier_name"), currency)
         if (
             paid_key == supplier_key
             and normalize_invoice_number(paid.get("invoice_number")) == normalized_number
             and _date_fiscal_year(paid.get("invoice_date")) == fiscal_year
         ):
-            return ["duplicate"]
+            matches.append(
+                {
+                    "source": "Paid invoice history",
+                    "document_id": None,
+                    "invoice_number": paid.get("invoice_number"),
+                    "invoice_date": paid.get("invoice_date"),
+                    "paid_on": paid.get("paid_on"),
+                    "total": paid.get("total"),
+                }
+            )
     rows = conn.execute(
-        "SELECT document_type, supplier_name, supplier_gstin, invoice_number, invoice_date FROM invoices"
+        "SELECT id, document_id, document_type, supplier_name, supplier_gstin, invoice_number, "
+        "invoice_date, total_paise FROM invoices"
     ).fetchall()
     for row in rows:
         if (
-            row["document_type"] == "invoice"
-            and _supplier_key(row["supplier_gstin"], row["supplier_name"], inv.currency) == supplier_key
+            row["id"] != exclude_invoice_id
+            and row["document_type"] == "invoice"
+            and _supplier_key(row["supplier_gstin"], row["supplier_name"], currency) == supplier_key
             and normalize_invoice_number(row["invoice_number"]) == normalized_number
             and _date_fiscal_year(row["invoice_date"]) == fiscal_year
         ):
-            return ["duplicate"]
-    return []
+            matches.append(
+                {
+                    "source": "Earlier invoice in this batch",
+                    "document_id": row["document_id"],
+                    "invoice_number": row["invoice_number"],
+                    "invoice_date": row["invoice_date"],
+                    "paid_on": None,
+                    "total": (
+                        f"{Decimal(row['total_paise']) / 100:.2f}"
+                        if row["total_paise"] is not None
+                        else None
+                    ),
+                }
+            )
+    return matches
+
+
+def check_duplicate(conn: sqlite3.Connection, ref: ReferenceData, inv: Invoice) -> list[str]:
+    matches = find_duplicate_records(
+        conn,
+        ref,
+        document_type=inv.document_type,
+        supplier_gstin=inv.supplier_gstin,
+        supplier_name=inv.supplier_name,
+        currency=inv.currency,
+        invoice_number=inv.invoice_number,
+        invoice_date=inv.invoice_date,
+    )
+    return ["duplicate"] if matches else []
 
 
 def check_bank_details(inv: Invoice, vendor: dict | None) -> list[str]:

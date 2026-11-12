@@ -22,3 +22,4 @@ def test_unreadable_document_gets_processing_error_output(tmp_path, monkeypatch,
     assert len(rows) == 1
     assert rows[0]["needs_review"] is True
     assert rows[0]["review_reasons"] == ["processing_error"]
+    assert rows[0]["evidence"]["invoice_number"]["status"] == "unavailable"

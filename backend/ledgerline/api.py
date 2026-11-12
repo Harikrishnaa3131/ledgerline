@@ -1,14 +1,22 @@
 """HTTP API used by the reviewer UI.  Run: uvicorn ledgerline.api:app --reload"""
 from __future__ import annotations
 
+import json
+
 from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import db
 from .config import USD_TO_INR, get_settings
+from .evidence import (
+    build_invoice_evidence,
+    build_review_details,
+    review_priority,
+)
 from .pipeline import process_document
 from .reference import load_reference
+from .validation import find_duplicate_records
 
 app = FastAPI(title="Ledgerline API", version="0.3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -40,22 +48,46 @@ def health() -> dict:
 async def upload_invoice(file: UploadFile, org_id: str = Depends(get_org), conn=Depends(get_conn)):
     raw_text = (await file.read()).decode("utf-8")
     document_id = (file.filename or "upload").rsplit(".", 1)[0]
-    return process_document(conn, load_reference(), raw_text, document_id, org_id=org_id, filename=file.filename)
+    invoice = process_document(conn, load_reference(), raw_text, document_id, org_id=org_id, filename=file.filename)
+    return _with_evidence(invoice, conn)
 
 
 @app.get("/api/invoices")
-def list_invoices(org_id: str = Depends(get_org), conn=Depends(get_conn)):
+def list_invoices(
+    status: str = "all",
+    limit: int = 300,
+    offset: int = 0,
+    org_id: str = Depends(get_org),
+    conn=Depends(get_conn),
+):
+    allowed_statuses = {"all", "needs_review", "ready_for_approval", "approved", "rejected"}
+    if status not in allowed_statuses:
+        raise HTTPException(status_code=422, detail="Invalid invoice queue status")
+    if not 1 <= limit <= 1000 or offset < 0:
+        raise HTTPException(status_code=422, detail="Invalid invoice queue pagination")
     rows = conn.execute(
         "SELECT id, document_id, supplier_name, invoice_number, invoice_date, currency, total_paise, status, "
-        "needs_review FROM invoices WHERE org_id = ? ORDER BY id DESC",
+        "needs_review, review_reasons_json, created_at FROM invoices WHERE org_id = ?",
         (org_id,),
     ).fetchall()
     results = []
     for row in rows:
         invoice = dict(row)
+        if status != "all" and invoice["status"] != status:
+            continue
+        reasons = json.loads(invoice.pop("review_reasons_json") or "[]")
+        rank, priority = review_priority(invoice["status"], reasons)
         invoice["total"] = db.from_paise(invoice.pop("total_paise"))
+        invoice["review_reasons"] = reasons
+        invoice["priority"] = priority
+        invoice["_priority_rank"] = rank
         results.append(invoice)
-    return results
+    results.sort(key=lambda invoice: (invoice["_priority_rank"], invoice["created_at"], invoice["id"]))
+    page = results[offset : offset + limit]
+    for invoice in page:
+        invoice.pop("_priority_rank")
+        invoice.pop("created_at")
+    return page
 
 
 @app.get("/api/invoices/{invoice_id}")
@@ -63,7 +95,7 @@ def get_invoice(invoice_id: int, conn=Depends(get_conn)):
     invoice = db.get_invoice(conn, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    return invoice
+    return _with_evidence(invoice, conn)
 
 
 @app.post("/api/invoices/{invoice_id}/approve")
@@ -85,7 +117,8 @@ def approve_invoice(invoice_id: int, body: DecisionRequest, conn=Depends(get_con
                 "status": invoice["status"],
             }
         reasons = invoice.get("review_reasons") or []
-        if not body.user_id.strip():
+        user_id = body.user_id.strip()
+        if not user_id:
             raise HTTPException(status_code=422, detail="Approver identity is required")
         if (
             invoice["document_type"] == "credit_note"
@@ -98,7 +131,7 @@ def approve_invoice(invoice_id: int, body: DecisionRequest, conn=Depends(get_con
             raise HTTPException(status_code=422, detail="An approval note is required for reviewed documents")
         conn.execute(
             "INSERT OR IGNORE INTO approvals (invoice_id, user_id, note) VALUES (?, ?, ?)",
-            (invoice_id, body.user_id, body.note),
+            (invoice_id, user_id, body.note),
         )
         approvals = conn.execute(
             "SELECT COUNT(DISTINCT user_id) FROM approvals WHERE invoice_id = ?", (invoice_id,)
@@ -130,9 +163,65 @@ def approve_invoice(invoice_id: int, body: DecisionRequest, conn=Depends(get_con
 
 @app.post("/api/invoices/{invoice_id}/reject")
 def reject_invoice(invoice_id: int, body: DecisionRequest, conn=Depends(get_conn)):
-    conn.execute("UPDATE invoices SET status = 'rejected' WHERE id = ?", (invoice_id,))
-    conn.commit()
-    return {"id": invoice_id, "status": "rejected"}
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        invoice = db.get_invoice(conn, invoice_id)
+        if invoice is None:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        if not body.user_id.strip():
+            raise HTTPException(status_code=422, detail="Reviewer identity is required")
+        if invoice["status"] == "approved":
+            raise HTTPException(status_code=409, detail="An approved invoice cannot be rejected")
+        existing = conn.execute(
+            "SELECT user_id, note FROM rejections WHERE invoice_id = ?", (invoice_id,)
+        ).fetchone()
+        if invoice["status"] == "rejected" or existing:
+            conn.commit()
+            return {
+                "id": invoice_id,
+                "status": "rejected",
+                "rejected_by": existing["user_id"] if existing else None,
+            }
+        user_id = body.user_id.strip()
+        conn.execute(
+            "INSERT INTO rejections (invoice_id, user_id, note) VALUES (?, ?, ?)",
+            (invoice_id, user_id, body.note),
+        )
+        conn.execute(
+            "UPDATE invoices SET status = 'rejected' WHERE id = ? "
+            "AND status IN ('ready_for_approval', 'needs_review')",
+            (invoice_id,),
+        )
+        conn.commit()
+        return {"id": invoice_id, "status": "rejected", "rejected_by": user_id}
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _with_evidence(invoice: dict, conn) -> dict:
+    evidence = build_invoice_evidence(invoice)
+    invoice["evidence"] = evidence
+    duplicate_matches = []
+    if "duplicate" in invoice["review_reasons"]:
+        duplicate_matches = find_duplicate_records(
+            conn,
+            load_reference(),
+            document_type=invoice["document_type"],
+            supplier_gstin=invoice["supplier_gstin"],
+            supplier_name=invoice["supplier_name"],
+            currency=invoice["currency"],
+            invoice_number=invoice["invoice_number"],
+            invoice_date=invoice["invoice_date"],
+            exclude_invoice_id=invoice["id"],
+        )
+    invoice["review_details"] = build_review_details(invoice, evidence, duplicate_matches)
+    _, invoice["priority"] = review_priority(invoice["status"], invoice["review_reasons"])
+    invoice["approval_count"] = conn.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM approvals WHERE invoice_id = ?",
+        (invoice["id"],),
+    ).fetchone()[0]
+    return invoice
 
 
 @app.get("/api/stats")

@@ -38,7 +38,7 @@ It must work from a fresh clone after `pip install -e ./backend` and `cp .env.ex
 | `review_reasons` | list of strings | Codes from section 3 of `AP_POLICY.md`, in any order. New codes only behind a flag (see Part 2 of the README). |
 | `required_approvals` | integer | As defined in section 4 of `AP_POLICY.md`. |
 | `usage` | object | Measured for this document: `llm_calls`, `input_tokens`, `output_tokens`, `cost_inr`, `latency_ms`. |
-| `evidence` | object, optional | For Part 4A. Maps a field name to `{"start": int, "end": int, "text": str}`. Offsets are Python string indices into the document decoded as UTF-8, and `text` must equal that slice exactly. Leave a field out rather than guess. |
+| `evidence` | object, optional | Maps each field (line items use keys such as `line_items.0.amount`) to source matches. A single exact match has `status: "found"` and `char_start`, `char_end`, `source_text`; offsets are Python string indices into the UTF-8-decoded document, and `source_text` must equal that slice exactly. Repeated matches use `status: "ambiguous"` and provide exact `matches`; absent or unlocatable values use `status: "unavailable"` or `"not_found"` with null offsets. Never guess a span. |
 
 ## Example
 
@@ -88,19 +88,43 @@ Shown wrapped for readability. Write each object on a single line. The `usage` n
   },
   "evidence": {
     "total": {
-      "start": 1486,
-      "end": 1495,
-      "text": "23,458.00"
+      "status": "found",
+      "char_start": 1486,
+      "char_end": 1495,
+      "source_text": "23,458.00",
+      "matches": [
+        {
+          "char_start": 1486,
+          "char_end": 1495,
+          "source_text": "23,458.00"
+        }
+      ]
     },
     "invoice_date": {
-      "start": 440,
-      "end": 450,
-      "text": "25/04/2026"
+      "status": "found",
+      "char_start": 440,
+      "char_end": 450,
+      "source_text": "25/04/2026",
+      "matches": [
+        {
+          "char_start": 440,
+          "char_end": 450,
+          "source_text": "25/04/2026"
+        }
+      ]
     },
     "supplier_gstin": {
-      "start": 169,
-      "end": 184,
-      "text": "27AAKCS4821M1ZW"
+      "status": "found",
+      "char_start": 169,
+      "char_end": 184,
+      "source_text": "27AAKCS4821M1ZW",
+      "matches": [
+        {
+          "char_start": 169,
+          "char_end": 184,
+          "source_text": "27AAKCS4821M1ZW"
+        }
+      ]
     }
   }
 }

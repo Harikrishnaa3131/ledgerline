@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import db
+from .evidence import build_invoice_evidence
 from .pipeline import process_document, record_processing_error
 from .reference import load_reference
 
@@ -45,6 +46,7 @@ def to_contract(invoice: dict) -> dict:
     out["review_reasons"] = invoice["review_reasons"]
     out["required_approvals"] = invoice["required_approvals"]
     out["usage"] = invoice["usage"]
+    out["evidence"] = build_invoice_evidence(invoice)
     return out
 
 
