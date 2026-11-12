@@ -1,6 +1,8 @@
 import json
+from pathlib import Path
 
-from ledgerline.pipeline import extract_bank_details, process_document
+from ledgerline.pipeline import extract_bank_details, normalize, process_document
+from ledgerline.validation import run_checks
 
 
 def test_process_document_persists_invoice(conn, ref, fake_llm):
@@ -108,6 +110,15 @@ def test_buyer_gstin_mismatch_flag_is_off_by_default(conn, ref, fake_llm, monkey
     assert "buyer_gstin_mismatch" not in invoice["review_reasons"]
 
 
+def test_recipient_heading_does_not_match_supplier_gstin_as_buyer(conn, ref, fake_llm, monkeypatch):
+    monkeypatch.setenv("LEDGERLINE_FLAG_BUYER_GSTIN_MISMATCH", "1")
+    raw_text = (Path(__file__).resolve().parents[2] / "data/invoices/disputed/disp_03.txt").read_text(
+        encoding="utf-8"
+    )
+    invoice = process_document(conn, ref, raw_text, "foreign_invoice")
+    assert "buyer_gstin_mismatch" not in invoice["review_reasons"]
+
+
 def test_email_headers_are_not_flagged_as_embedded_markup(conn, ref, fake_llm):
     invoice = process_document(
         conn,
@@ -134,3 +145,115 @@ def test_high_value_approval_threshold_is_inclusive(conn, ref, fake_llm):
     fake_llm.responses = [json.dumps(data)]
     invoice = process_document(conn, ref, "invoice", "high_value")
     assert invoice["required_approvals"] == 2
+
+
+def test_disputed_revised_invoice_is_blocked_as_a_paid_duplicate(conn, ref, fake_llm):
+    from ledgerline.llm.fake import CANNED_EXTRACTION
+
+    data = dict(CANNED_EXTRACTION)
+    data.update(
+        supplier_name="Sitara Industrial Supplies Pvt. Ltd.",
+        supplier_gstin="27AAKCS4821M1ZW",
+        invoice_number="SIS/26-27/0018",
+        invoice_date="02/04/2026",
+        currency="INR",
+        subtotal="30400.00",
+        cgst="2736.00",
+        sgst="2736.00",
+        total="35872.00",
+        line_items=[{"description": "SS Hex Bolt", "quantity": "20", "unit_price": "1520", "amount": "30400"}],
+    )
+    fake_llm.responses = [json.dumps(data)]
+    raw_text = (Path(__file__).resolve().parents[2] / "data/invoices/disputed/disp_02.txt").read_text(
+        encoding="utf-8"
+    )
+
+    invoice = process_document(conn, ref, raw_text, "disp_02")
+
+    assert invoice["review_reasons"] == ["duplicate"]
+    assert invoice["needs_review"] is True
+    assert invoice["required_approvals"] == 1
+
+
+def test_disputed_usd_invoice_routes_for_two_approvals(conn, ref, fake_llm):
+    from ledgerline.llm.fake import CANNED_EXTRACTION
+
+    data = dict(CANNED_EXTRACTION)
+    data.update(
+        supplier_name="Narmada Polymers LLP",
+        supplier_gstin="24AAOFN2207Q1ZX",
+        invoice_number="NPL/2627/0377",
+        invoice_date="28-04-2026",
+        currency="USD",
+        subtotal="2240.00",
+        cgst="0.00",
+        sgst="0.00",
+        igst="403.20",
+        total="2643.20",
+        line_items=[{"description": "PP Copolymer Natural", "quantity": "2000", "unit_price": "1.12", "amount": "2240"}],
+    )
+    fake_llm.responses = [json.dumps(data)]
+    raw_text = (Path(__file__).resolve().parents[2] / "data/invoices/disputed/disp_03.txt").read_text(
+        encoding="utf-8"
+    )
+
+    invoice = process_document(conn, ref, raw_text, "disp_03")
+
+    assert invoice["review_reasons"] == ["foreign_currency"]
+    assert invoice["required_approvals"] == 2
+
+
+def test_disputed_email_to_ap_automation_is_reviewed(conn, ref, fake_llm):
+    from ledgerline.llm.fake import CANNED_EXTRACTION
+
+    data = dict(CANNED_EXTRACTION)
+    data.update(
+        supplier_name="Vardhan Logistics",
+        supplier_gstin="27AAJFV6651D1ZZ",
+        invoice_number="VL/0968",
+        invoice_date="05/05/2026",
+        currency="INR",
+        subtotal="48000.00",
+        cgst="4320.00",
+        sgst="4320.00",
+        total="56640.00",
+        line_items=[{"description": "Freight charges", "quantity": "6", "unit_price": "8000", "amount": "48000"}],
+    )
+    fake_llm.responses = [json.dumps(data)]
+    raw_text = (Path(__file__).resolve().parents[2] / "data/invoices/disputed/disp_04.eml").read_text(
+        encoding="utf-8"
+    )
+
+    invoice = process_document(conn, ref, raw_text, "disp_04")
+
+    assert invoice["review_reasons"] == ["suspicious_content"]
+    assert invoice["required_approvals"] == 1
+
+
+def test_disputed_line_item_extension_is_off_by_default_and_flagged_when_enabled(
+    conn, ref, monkeypatch
+):
+    monkeypatch.delenv("LEDGERLINE_FLAG_LINE_ITEM_ARITHMETIC", raising=False)
+    invoice = normalize(
+        {
+            "document_type": "invoice",
+            "supplier_name": "Precision Gauges & Instruments",
+            "supplier_gstin": "27AABFP2915E1ZK",
+            "invoice_number": "PGI/26-27/018",
+            "invoice_date": "06/05/2026",
+            "currency": "INR",
+            "subtotal": "24950.00",
+            "cgst": "2245.50",
+            "sgst": "2245.50",
+            "total": "29441.00",
+            "line_items": [
+                {"description": "Plug Gauge", "quantity": "4", "unit_price": "3850", "amount": "15950"},
+                {"description": "Calibration service", "quantity": "6", "unit_price": "1500", "amount": "9000"},
+            ],
+        },
+        ref,
+    )
+    assert "totals_mismatch" not in run_checks(conn, ref, invoice)
+
+    monkeypatch.setenv("LEDGERLINE_FLAG_LINE_ITEM_ARITHMETIC", "1")
+    assert "totals_mismatch" in run_checks(conn, ref, invoice)

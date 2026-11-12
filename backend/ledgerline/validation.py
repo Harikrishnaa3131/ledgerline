@@ -25,6 +25,10 @@ SUSPICIOUS_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(r"\b(?:ignore|disregard|override|bypass|skip)\b.{0,100}\b(?:instructions?|policy|checks?|rules?|review|approval)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:for|to)\s+(?:your\s+)?(?:ap|invoice|accounts payable)\s+automation\s+system\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"<\s*/?\s*[a-z][a-z0-9]*(?:\s+[^<>]*|/?)>", re.IGNORECASE),
 )
 
@@ -69,7 +73,7 @@ def find_vendor(
     if not normalized_name:
         return None
     for vendor in ref.vendors:
-        if vendor.get("country") != "IN" and normalize_foreign_name(vendor.get("legal_name")) == normalized_name:
+        if normalize_foreign_name(vendor.get("legal_name")) == normalized_name:
             return vendor
     return None
 
@@ -95,18 +99,19 @@ def check_tax_type(inv: Invoice, buyer_state_code: str = "27") -> list[str]:
     return []
 
 
-def check_totals(inv: Invoice) -> list[str]:
+def check_totals(inv: Invoice, check_line_item_arithmetic: bool = False) -> list[str]:
     if inv.total is None:
         return []
     tolerance = Decimal("1.00")
     line_sum = sum((Decimal(str(item.amount)) for item in inv.line_items), Decimal(0))
-    if inv.subtotal is not None and abs(line_sum - Decimal(str(inv.subtotal))) > tolerance:
-        return ["totals_mismatch"]
-    for item in inv.line_items:
-        if item.quantity is not None and item.unit_price is not None:
-            line_total = Decimal(str(item.quantity)) * Decimal(str(item.unit_price))
-            if abs(line_total - Decimal(str(item.amount))) > tolerance:
-                return ["totals_mismatch"]
+    if check_line_item_arithmetic:
+        if inv.subtotal is not None and abs(line_sum - Decimal(str(inv.subtotal))) > tolerance:
+            return ["totals_mismatch"]
+        for item in inv.line_items:
+            if item.quantity is not None and item.unit_price is not None:
+                line_total = Decimal(str(item.quantity)) * Decimal(str(item.unit_price))
+                if abs(line_total - Decimal(str(item.amount))) > tolerance:
+                    return ["totals_mismatch"]
     computed = line_sum + sum(
         (Decimal(str(amount)) for amount in (inv.cgst, inv.sgst, inv.igst, inv.round_off)),
         Decimal(0),
@@ -189,7 +194,10 @@ def run_checks(conn: sqlite3.Connection, ref: ReferenceData, inv: Invoice, raw_t
         + check_gstin(inv)
         + check_vendor(vendor)
         + check_tax_type(inv, buyer_state)
-        + check_totals(inv)
+        + check_totals(
+            inv,
+            check_line_item_arithmetic=os.getenv("LEDGERLINE_FLAG_LINE_ITEM_ARITHMETIC") == "1",
+        )
         + check_duplicate(conn, ref, inv)
         + check_bank_details(inv, vendor)
         + check_vendor_new(inv, vendor)
@@ -230,8 +238,9 @@ def _extract_buyer_gstin(raw_text: str) -> str | None:
             if value:
                 return str(value).strip().upper()
     match = re.search(
-        r"(?:buyer|bill\s*to|recipient).{0,120}?(?:GSTIN(?:/UIN)?|GSTIN)\s*[:#]?\s*([0-9A-Z]{15})",
+        r"^\s*(?:buyer(?:\s*\(bill\s*to\))?|\bbill\s*to)\b.{0,200}?"
+        r"(?:GSTIN(?:/UIN)?|GSTIN)\s*[:#]?\s*([0-9A-Z]{15})",
         raw_text,
-        re.IGNORECASE | re.DOTALL,
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
     return match.group(1).upper() if match else None
