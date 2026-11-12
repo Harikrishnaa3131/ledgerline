@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from ledgerline.parsing import parse_amount, parse_date
 
@@ -12,7 +13,7 @@ def test_parse_amount_rupee_symbol():
 
 
 def test_parse_amount_passes_numbers_through():
-    assert parse_amount(1789.2) == 1789.2
+    assert parse_amount(1789.2) == Decimal("1789.2")
 
 
 def test_parse_amount_empty_is_none():
@@ -24,8 +25,17 @@ def test_parse_date_iso():
 
 
 def test_parse_date_with_slashes():
-    assert parse_date("03/04/2026") == date(2026, 3, 4)
+    assert parse_date("03/04/2026") == date(2026, 4, 3)
 
 
 def test_parse_date_day_first_when_unambiguous():
     assert parse_date("25/04/2026") == date(2026, 4, 25)
+
+
+def test_us_dates_are_month_first():
+    assert parse_date("03/04/2026", dayfirst=False) == date(2026, 3, 4)
+
+
+def test_parse_amount_lakh_and_crore():
+    assert parse_amount("1.25 lakh") == Decimal(125000)
+    assert parse_amount("2 crore") == Decimal(20000000)

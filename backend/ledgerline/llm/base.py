@@ -14,5 +14,9 @@ class LLMResponse:
     latency_ms: int
 
 
+class ProviderError(RuntimeError):
+    """A provider call failed without exposing request credentials in logs."""
+
+
 class LLMClient(Protocol):
     def complete(self, system: str, prompt: str, max_tokens: int = 2000) -> LLMResponse: ...

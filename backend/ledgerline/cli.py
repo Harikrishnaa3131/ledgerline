@@ -11,10 +11,11 @@ import argparse
 import json
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 from . import db
-from .pipeline import process_document
+from .pipeline import process_document, record_processing_error
 from .reference import load_reference
 
 SUPPORTED_SUFFIXES = {".txt", ".eml", ".json"}
@@ -25,14 +26,32 @@ TEXT_FIELDS = ["document_type", "supplier_name", "supplier_gstin", "invoice_numb
 
 def to_contract(invoice: dict) -> dict:
     out = {"document_id": invoice["document_id"]}
-    out.update({f: invoice[f] for f in TEXT_FIELDS})
+    for field in TEXT_FIELDS:
+        value = invoice[field]
+        if value is None and field in {"document_type", "supplier_name", "invoice_number", "invoice_date", "currency"}:
+            value = ""
+        out[field] = value
     out.update({f: None if invoice[f] is None else f"{invoice[f]:.2f}" for f in MONEY_FIELDS})
-    out["line_items"] = invoice["line_items"]
+    out["line_items"] = [
+        {
+            "description": item["description"],
+            "quantity": _format_quantity(item["quantity"]),
+            "unit_price": f"{Decimal(str(item['unit_price'])):.2f}" if item["unit_price"] is not None else None,
+            "amount": f"{Decimal(str(item['amount'])):.2f}",
+        }
+        for item in invoice["line_items"]
+    ]
     out["needs_review"] = invoice["needs_review"]
     out["review_reasons"] = invoice["review_reasons"]
     out["required_approvals"] = invoice["required_approvals"]
     out["usage"] = invoice["usage"]
     return out
+
+
+def _format_quantity(value) -> str | None:
+    if value is None:
+        return None
+    return format(Decimal(str(value)).normalize(), "f")
 
 
 def predict(args: argparse.Namespace) -> None:
@@ -44,11 +63,14 @@ def predict(args: argparse.Namespace) -> None:
     with open(args.output, "w", encoding="utf-8") as out:
         for path in documents:
             try:
-                invoice = process_document(conn, ref, path.read_text(encoding="utf-8"), path.stem,
-                                           filename=path.name)
-            except Exception as exc:  # keep the batch going
-                print(f"[skip] {path.name}: {exc}", file=sys.stderr)
-                continue
+                raw_text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                print(f"[processing_error] {path.name}: {type(exc).__name__}", file=sys.stderr)
+                invoice = record_processing_error(conn, path.stem, path.name, exc)
+            else:
+                invoice = process_document(
+                    conn, ref, raw_text, path.stem, filename=path.name
+                )
             out.write(json.dumps(to_contract(invoice), ensure_ascii=False) + "\n")
             written += 1
     print(f"wrote {written}/{len(documents)} predictions to {args.output}")

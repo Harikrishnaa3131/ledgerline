@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 from ..config import get_settings
-from .base import LLMClient, LLMResponse
+from .base import LLMClient, LLMResponse, ProviderError
 
-__all__ = ["LLMClient", "LLMResponse", "get_client"]
+__all__ = ["LLMClient", "LLMResponse", "ProviderError", "get_client"]
 
 
 def get_client() -> LLMClient:
     settings = get_settings()
     if settings.llm_provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise ProviderError("ANTHROPIC_API_KEY is not configured")
         from .anthropic_client import AnthropicClient
 
         return AnthropicClient(settings.anthropic_api_key, settings.llm_model)

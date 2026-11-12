@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 
 
 @dataclass
 class LineItem:
     description: str
-    quantity: float | None
-    unit_price: float | None
-    amount: float
+    quantity: Decimal | None
+    unit_price: Decimal | None
+    amount: Decimal
 
 
 @dataclass
@@ -21,12 +22,12 @@ class Invoice:
     invoice_number: str | None
     invoice_date: date | None
     currency: str
-    subtotal: float | None
-    cgst: float
-    sgst: float
-    igst: float
-    round_off: float
-    total: float | None
+    subtotal: Decimal | None
+    cgst: Decimal
+    sgst: Decimal
+    igst: Decimal
+    round_off: Decimal
+    total: Decimal | None
     bank_account: str | None
     ifsc: str | None
     po_number: str | None

@@ -9,7 +9,7 @@ import time
 
 import httpx
 
-from .base import LLMResponse
+from .base import LLMResponse, ProviderError
 
 
 class OpenAICompatClient:
@@ -22,18 +22,21 @@ class OpenAICompatClient:
     def complete(self, system: str, prompt: str, max_tokens: int = 2000) -> LLMResponse:
         started = time.monotonic()
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            timeout=self.timeout,
-            json={
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                timeout=self.timeout,
+                json={
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+        except httpx.HTTPError as exc:
+            raise ProviderError(type(exc).__name__) from exc
         usage = body.get("usage") or {}
         return LLMResponse(
             text=body["choices"][0]["message"]["content"] or "",
