@@ -171,4 +171,22 @@ submission/               templates for your write-ups
 
 ## Running my version
 
-_Describe anything that changed about setup or commands._
+No new packages are required. On Windows PowerShell, from the repository root, the offline fake provider can generate the committed test predictions:
+
+```powershell
+Set-Location .\backend
+$env:LLM_PROVIDER = "fake"
+Remove-Item Env:LEDGERLINE_FLAG_BUYER_GSTIN_MISMATCH -ErrorAction SilentlyContinue
+Remove-Item Env:LEDGERLINE_FLAG_LINE_ITEM_ARITHMETIC -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -m ledgerline.cli predict --input ..\data\invoices\dev --reference ..\data\reference --output ..\submission\predictions_dev.jsonl
+
+$env:LEDGERLINE_FLAG_BUYER_GSTIN_MISMATCH = "1"
+$env:LEDGERLINE_FLAG_LINE_ITEM_ARITHMETIC = "1"
+.\.venv\Scripts\python.exe -m ledgerline.cli predict --input ..\data\invoices\disputed --reference ..\data\reference --output ..\submission\predictions_disputed.jsonl
+Remove-Item Env:LEDGERLINE_FLAG_BUYER_GSTIN_MISMATCH -ErrorAction SilentlyContinue
+Remove-Item Env:LEDGERLINE_FLAG_LINE_ITEM_ARITHMETIC -ErrorAction SilentlyContinue
+
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Both `LEDGERLINE_FLAG_*` settings are off unless explicitly set to `1`; enable them only for the disputed prediction run when reproducing these artifacts. The fake provider repeats a canned extraction, so these JSONL files verify batch execution and routing code, not extraction quality. The CLI accepts explicit input and reference directories; see [`docs/OUTPUT_CONTRACT.md`](docs/OUTPUT_CONTRACT.md).
